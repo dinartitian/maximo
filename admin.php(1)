@@ -1,0 +1,748 @@
+<?php
+session_start();
+require_once 'config.php';
+
+// Basic authentication check
+if (!isset($_SESSION['logged_in'])) {
+    header('Location: login.php');
+    exit();
+}
+
+// Handle logout
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header('Location: login.php');
+    exit();
+}
+
+// Error and success message handling
+$messages = [];
+
+try {
+    // Handle media editing
+    if (isset($_POST['edit_media'])) {
+        $media_id = $_POST['media_id'];
+        $title = $_POST['title'];
+        $schedule_start = $_POST['schedule_start'];
+        $schedule_end = $_POST['schedule_end'];
+        $is_active = isset($_POST['is_active']) ? 1 : 0;
+
+        // Validate schedule dates
+        $start = new DateTime($schedule_start);
+        $end = new DateTime($schedule_end);
+
+        if ($start > $end) {
+            throw new Exception("Jadwal mulai harus lebih awal dari jadwal berakhir.");
+        }
+
+        // Update database
+        $stmt = $pdo->prepare("
+            UPDATE media 
+            SET title = ?, 
+                schedule_start = ?, 
+                schedule_end = ?,
+                is_active = ?
+            WHERE id = ?
+        ");
+
+        $stmt->execute([
+            $title,
+            $start->format('Y-m-d H:i:s'),
+            $end->format('Y-m-d H:i:s'),
+            $is_active,
+            $media_id
+        ]);
+
+        $_SESSION['success'] = "Media berhasil diperbarui!";
+        $orientation = isset($_POST['orientation']) ? $_POST['orientation'] : 'landscape';
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?tab=' . $orientation);
+        exit();
+    }
+
+    // Handle running text editing
+    if (isset($_POST['edit_runtext'])) {
+        $runtext_id = $_POST['runtext_id'];
+        $content = $_POST['content'];
+        $orientation = $_POST['orientation'];
+        $schedule_start = $_POST['schedule_start'];
+        $schedule_end = $_POST['schedule_end'];
+        $is_active = isset($_POST['is_active']) ? 1 : 0;
+
+        // Validate schedule dates if provided
+        if (!empty($schedule_start) && !empty($schedule_end)) {
+            $start = new DateTime($schedule_start);
+            $end = new DateTime($schedule_end);
+
+            if ($start > $end) {
+                throw new Exception("Jadwal mulai harus lebih awal dari jadwal berakhir.");
+            }
+        }
+
+        // Update database
+        $stmt = $pdo->prepare("
+            UPDATE running_text 
+            SET content = ?, 
+                orientation = ?, 
+                schedule_start = ?, 
+                schedule_end = ?,
+                is_active = ?
+            WHERE id = ?
+        ");
+
+        $stmt->execute([
+            $content,
+            $orientation,
+            !empty($schedule_start) ? $start->format('Y-m-d H:i:s') : null,
+            !empty($schedule_end) ? $end->format('Y-m-d H:i:s') : null,
+            $is_active,
+            $runtext_id
+        ]);
+
+        $_SESSION['success'] = "Running text berhasil diperbarui!";
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?tab=running-text');
+        exit();
+    }
+
+    // Handle media deletion
+    if (isset($_GET['delete_media']) && is_numeric($_GET['delete_media'])) {
+        $stmt = $pdo->prepare("SELECT filename FROM media WHERE id = ?");
+        $stmt->execute([$_GET['delete_media']]);
+        $file = $stmt->fetch();
+
+        if ($file) {
+            $filepath = "assets/media/" . $file['filename'];
+            if (file_exists($filepath)) {
+                unlink($filepath);
+            }
+
+            $stmt = $pdo->prepare("DELETE FROM media WHERE id = ?");
+            $stmt->execute([$_GET['delete_media']]);
+            $_SESSION['success'] = "Media berhasil dihapus!";
+        }
+
+        $orientation = isset($_GET['orientation']) ? $_GET['orientation'] : 'landscape';
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?tab=' . $orientation);
+        exit();
+    }
+
+    // Handle running text deletion
+    if (isset($_GET['delete_runtext']) && is_numeric($_GET['delete_runtext'])) {
+        $stmt = $pdo->prepare("DELETE FROM running_text WHERE id = ?");
+        $stmt->execute([$_GET['delete_runtext']]);
+        $_SESSION['success'] = "Running text berhasil dihapus!";
+
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?tab=running-text');
+        exit();
+    }
+
+    // Handle file upload with schedule
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['media'])) {
+        $target_dir = "assets/media/";
+
+        if (!is_dir($target_dir)) {
+            mkdir($target_dir, 0755, true);
+        }
+
+        $file_extension = strtolower(pathinfo($_FILES["media"]["name"], PATHINFO_EXTENSION));
+
+        if ($_POST['orientation'] === 'portrait') {
+            $allowed_extensions = ['jpg', 'jpeg', 'png', 'gif'];
+            if (!in_array($file_extension, $allowed_extensions)) {
+                throw new Exception("Untuk mode Portrait, hanya mendukung format gambar (JPG, JPEG, PNG, GIF).");
+            }
+        } else {
+            $allowed_extensions = ['mp4', 'jpg', 'jpeg', 'png', 'gif'];
+            if (!in_array($file_extension, $allowed_extensions)) {
+                throw new Exception("Format file tidak didukung.");
+            }
+        }
+
+        // Generate unique filename
+        $new_filename = uniqid() . '_' . time() . '.' . $file_extension;
+        $target_file = $target_dir . $new_filename;
+
+        // Validate schedule dates
+        $schedule_start = new DateTime($_POST['schedule_start']);
+        $schedule_end = new DateTime($_POST['schedule_end']);
+
+        if ($schedule_start > $schedule_end) {
+            throw new Exception("Jadwal mulai harus lebih awal dari jadwal berakhir.");
+        }
+
+        // Upload file
+        if (!move_uploaded_file($_FILES["media"]["tmp_name"], $target_file)) {
+            throw new Exception("Gagal mengupload file.");
+        }
+
+        // Insert to database
+        $stmt = $pdo->prepare("
+            INSERT INTO media (
+                filename, type, title, orientation, 
+                schedule_start, schedule_end, is_active,
+                upload_date
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, NOW())
+        ");
+
+        $stmt->execute([
+            $new_filename,
+            $file_extension,
+            $_POST['title'],
+            $_POST['orientation'],
+            $schedule_start->format('Y-m-d H:i:s'),
+            $schedule_end->format('Y-m-d H:i:s')
+        ]);
+
+        $_SESSION['success'] = "File berhasil diupload dengan jadwal!";
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?tab=' . $_POST['orientation']);
+        exit();
+    }
+
+    // Fetch media for both orientations with status
+    $stmt = $pdo->prepare("
+        SELECT *, 
+            CASE 
+                WHEN NOW() BETWEEN schedule_start AND schedule_end AND is_active = 1 
+                THEN 'Aktif'
+                WHEN NOW() < schedule_start THEN 'Dijadwalkan'
+                WHEN NOW() > schedule_end THEN 'Berakhir'
+                ELSE 'Nonaktif'
+            END as status_text
+        FROM media 
+        WHERE orientation = ? 
+        ORDER BY upload_date DESC
+    ");
+
+    $stmt->execute(['landscape']);
+    $landscape_media = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $stmt->execute(['portrait']);
+    $portrait_media = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Fetch running texts with status
+    $stmt = $pdo->query("
+        SELECT *, 
+            CASE 
+                WHEN NOW() BETWEEN schedule_start AND schedule_end AND is_active = 1 
+                THEN 'Aktif'
+                WHEN NOW() < schedule_start THEN 'Dijadwalkan'
+                WHEN NOW() > schedule_end THEN 'Berakhir'
+                ELSE 'Nonaktif'
+            END as status_text
+        FROM running_text 
+        ORDER BY created_at DESC
+    ");
+    $running_texts = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+    $_SESSION['error'] = "Error: " . $e->getMessage();
+    error_log("Admin Panel Error: " . $e->getMessage());
+}
+?>
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel - Digital Signage</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <style>
+        .media-preview {
+            max-width: 100px;
+            max-height: 100px;
+            object-fit: cover;
+        }
+        .status-aktif { color: #198754; }
+        .status-nonaktif { color: #dc3545; }
+        .status-dijadwalkan { color: #ffc107; }
+        .status-berakhir { color: #6c757d; }
+        .header-title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+        }
+        .card {
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+            margin-bottom: 1.5rem;
+        }
+        .card-header {
+            background-color: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+        }
+        .table {
+            margin-bottom: 0;
+        }
+        .table td {
+            vertical-align: middle;
+        }
+        .btn-group-sm > .btn {
+            padding: 0.25rem 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid mt-4">
+        <!-- Header -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h1 class="header-title">Digital Signage Admin Panel</h1>
+                <p class="text-muted">Kelola konten digital signage Anda</p>
+            </div>
+            <div class="d-flex gap-2 align-items-center">
+                <span class="text-muted">
+                    <i class="fa fa-user"></i> 
+                    <?= htmlspecialchars(isset($_SESSION['username']) ? $_SESSION['username'] : 'Admin') ?>
+                </span>
+                <a href="?logout=true" class="btn btn-danger">
+                    <i class="fa fa-sign-out"></i> Logout
+                </a>
+            </div>
+        </div>
+
+        <!-- Alert Messages -->
+        <?php if (isset($_SESSION['success'])) : ?>
+            <div class="alert alert-success alert-dismissible fade show">
+                <i class="fa fa-check-circle"></i> 
+                <?= $_SESSION['success']; ?>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            <?php unset($_SESSION['success']); ?>
+        <?php endif; ?>
+
+        <?php if (isset($_SESSION['error'])) : ?>
+            <div class="alert alert-danger alert-dismissible fade show">
+                <i class="fa fa-exclamation-circle"></i> 
+                <?= $_SESSION['error']; ?>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            <?php unset($_SESSION['error']); ?>
+        <?php endif; ?>
+
+        <!-- Navigation Tabs -->
+        <ul class="nav nav-tabs mb-4" id="modeTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link <?= !isset($_GET['tab']) || $_GET['tab'] === 'landscape' ? 'active' : '' ?>" 
+                        id="landscape-tab" data-bs-toggle="tab" data-bs-target="#landscape" type="button" role="tab">
+                    <i class="fa fa-television"></i> Landscape Mode
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link <?= isset($_GET['tab']) && $_GET['tab'] === 'portrait' ? 'active' : '' ?>"
+                        id="portrait-tab" data-bs-toggle="tab" data-bs-target="#portrait" type="button" role="tab">
+                    <i class="fa fa-mobile"></i> Portrait Mode
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link <?= isset($_GET['tab']) && $_GET['tab'] === 'running-text' ? 'active' : '' ?>"
+                        id="running-text-tab" data-bs-toggle="tab" data-bs-target="#running-text" type="button" role="tab">
+                    <i class="fa fa-text-width"></i> Running Text
+                </button>
+            </li>
+        </ul>
+
+        <!-- Tab Contents -->
+        <div class="tab-content" id="modeTabContent">
+            <?php foreach (['landscape', 'portrait'] as $orientation) : ?>
+                <div class="tab-pane fade <?= $orientation === 'landscape' && (!isset($_GET['tab']) || $_GET['tab'] === 'landscape') ? 'show active' : '' ?> <?= $orientation === 'portrait' && isset($_GET['tab']) && $_GET['tab'] === 'portrait' ? 'show active' : '' ?>" 
+                     id="<?= $orientation ?>" role="tabpanel">
+                    
+                    <!-- Upload Form -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h5 class="card-title mb-0">
+                                <i class="fa fa-upload"></i> Upload Media - <?= ucfirst($orientation) ?> Mode
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <form method="POST" enctype="multipart/form-data" class="needs-validation" novalidate>
+                                <input type="hidden" name="orientation" value="<?= $orientation ?>">
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label class="form-label">File Media</label>
+                                            <input type="file" class="form-control" name="media" required
+                                                   accept="<?= $orientation === 'portrait' ? '.jpg,.jpeg,.png,.gif' : '.mp4,.jpg,.jpeg,.png,.gif' ?>">
+                                            <div class="form-text">
+                                            <?= $orientation === 'portrait' ? 'Format yang didukung: JPG, JPEG, PNG, GIF' : 'Format yang didukung: MP4, JPG, JPEG, PNG, GIF' ?>
+                                            </div>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label">Judul Media</label>
+                                            <input type="text" class="form-control" name="title" required>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label class="form-label">Jadwal Mulai</label>
+                                            <input type="datetime-local" class="form-control" name="schedule_start" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label">Jadwal Berakhir</label>
+                                            <input type="datetime-local" class="form-control" name="schedule_end" required>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button type="submit" class="btn btn-primary">
+                                    <i class="fa fa-upload"></i> Upload Media
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Media List -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h5 class="card-title mb-0">
+                                <i class="fa fa-list"></i> Daftar Media - <?= ucfirst($orientation) ?> Mode
+                            </h5>
+                        </div>
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="table table-striped table-hover mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Preview</th>
+                                            <th>Judul</th>
+                                            <th>Tipe</th>
+                                            <th>Jadwal Mulai</th>
+                                            <th>Jadwal Berakhir</th>
+                                            <th>Status</th>
+                                            <th width="100">Aksi</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach (${$orientation . '_media'} as $media) : ?>
+                                            <tr data-schedule-start="<?= $media['schedule_start'] ?>" 
+    data-schedule-end="<?= $media['schedule_end'] ?>"
+    data-is-active="<?= $media['is_active'] ?>">
+    <td>
+        <?php if (in_array($media['type'], ['jpg', 'jpeg', 'png', 'gif'])) : ?>
+            <img src="assets/media/<?= htmlspecialchars($media['filename']) ?>" 
+                 class="media-preview" alt="<?= htmlspecialchars($media['title']) ?>">
+        <?php else : ?>
+            <i class="fa fa-file-video-o fa-3x text-muted"></i>
+        <?php endif; ?>
+    </td>
+                                                <td><?= htmlspecialchars($media['title']) ?></td>
+                                                <td><?= strtoupper($media['type']) ?></td>
+                                                <td><?= date('d/m/Y H:i', strtotime($media['schedule_start'])) ?></td>
+                                                <td><?= date('d/m/Y H:i', strtotime($media['schedule_end'])) ?></td>
+                                                <td>
+                                                    <span class="status-cell status-<?= strtolower($media['status_text']) ?>">
+                                                        <i class="fa fa-circle"></i>
+                                                        <?= $media['status_text'] ?>
+                                                    </span>
+                                                </td>
+                                                <td class="text-end">
+                                                    <div class="btn-group btn-group-sm">
+                                                        <button type="button" class="btn btn-warning" data-bs-toggle="modal" 
+                                                                data-bs-target="#editMediaModal<?= $media['id'] ?>"
+                                                                title="Edit">
+                                                            <i class="fa fa-edit"></i>
+                                                        </button>
+                                                        <a href="?delete_media=<?= $media['id'] ?>&orientation=<?= $orientation ?>" 
+                                                           class="btn btn-danger"
+                                                           onclick="return confirm('Yakin ingin menghapus media ini?')"
+                                                           title="Hapus">
+                                                            <i class="fa fa-trash"></i>
+                                                        </a>
+                                                    </div>
+                                                </td>
+                                            </tr>
+
+                                            <!-- Modal Edit Media -->
+                                            <div class="modal fade" id="editMediaModal<?= $media['id'] ?>" tabindex="-1">
+                                                <div class="modal-dialog">
+                                                    <div class="modal-content">
+                                                        <div class="modal-header">
+                                                            <h5 class="modal-title">Edit Media - <?= htmlspecialchars($media['title']) ?></h5>
+                                                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                                        </div>
+                                                        <form method="POST">
+                                                            <input type="hidden" name="edit_media" value="1">
+                                                            <input type="hidden" name="media_id" value="<?= $media['id'] ?>">
+                                                            <input type="hidden" name="orientation" value="<?= $orientation ?>">
+                                                            <div class="modal-body">
+                                                                <div class="mb-3">
+                                                                    <label class="form-label">Judul Media</label>
+                                                                    <input type="text" class="form-control" name="title" 
+                                                                           value="<?= htmlspecialchars($media['title']) ?>" required>
+                                                                </div>
+                                                                <div class="mb-3">
+                                                                    <label class="form-label">Jadwal Mulai</label>
+                                                                    <input type="datetime-local" class="form-control" 
+                                                                           name="schedule_start" 
+                                                                           value="<?= date('Y-m-d\TH:i', strtotime($media['schedule_start'])) ?>" required>
+                                                                </div>
+                                                                <div class="mb-3">
+                                                                    <label class="form-label">Jadwal Berakhir</label>
+                                                                    <input type="datetime-local" class="form-control" 
+                                                                           name="schedule_end" 
+                                                                           value="<?= date('Y-m-d\TH:i', strtotime($media['schedule_end'])) ?>" required>
+                                                                </div>
+                                                                <div class="mb-3">
+                                                                    <div class="form-check">
+                                                                        <input type="checkbox" class="form-check-input" id="is_active<?= $media['id'] ?>" 
+                                                                               name="is_active" <?= $media['is_active'] ? 'checked' : '' ?>>
+                                                                        <label class="form-check-label" for="is_active<?= $media['id'] ?>">Aktif</label>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            <div class="modal-footer">
+                                                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
+                                                                <button type="submit" class="btn btn-primary">Simpan Perubahan</button>
+                                                            </div>
+                                                        </form>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        <?php endforeach; ?>
+                                        <?php if (empty(${$orientation . '_media'})) : ?>
+                                            <tr>
+                                                <td colspan="7" class="text-center py-3">
+                                                    <i class="fa fa-info-circle"></i> Belum ada media untuk mode <?= ucfirst($orientation) ?>
+                                                </td>
+                                            </tr>
+                                        <?php endif; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            <?php endforeach; ?>
+
+            <!-- Running Text Tab -->
+            <div class="tab-pane fade <?= isset($_GET['tab']) && $_GET['tab'] === 'running-text' ? 'show active' : '' ?>" id="running-text" role="tabpanel">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">
+                            <i class="fa fa-plus"></i> Tambah Running Text
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <form method="POST" class="needs-validation" novalidate>
+                            <div class="row">
+                                <div class="col-md-12">
+                                    <div class="mb-3">
+                                        <label class="form-label">Konten Running Text</label>
+                                        <textarea class="form-control" name="content" rows="3" required
+                                                  placeholder="Masukkan teks yang akan ditampilkan"></textarea>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">Orientasi</label>
+                                        <select class="form-select" name="orientation" required>
+                                            <option value="">Pilih orientasi...</option>
+                                            <option value="landscape">Landscape</option>
+                                            <option value="portrait">Portrait</option>
+                                        </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <div class="form-check">
+                                            <input type="checkbox" class="form-check-input" id="is_active_runtext" 
+                                                   name="is_active" checked>
+                                            <label class="form-check-label" for="is_active_runtext">Aktif</label>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">Jadwal Mulai</label>
+                                        <input type="datetime-local" class="form-control" name="schedule_start">
+                                        <div class="form-text">Kosongkan untuk tidak menggunakan jadwal</div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label">Jadwal Berakhir</label>
+                                        <input type="datetime-local" class="form-control" name="schedule_end">
+                                        <div class="form-text">Kosongkan untuk tidak menggunakan jadwal</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fa fa-save"></i> Simpan Running Text
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Running Text List -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">
+                            <i class="fa fa-list"></i> Daftar Running Text
+                        </h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Konten</th>
+                                        <th>Orientasi</th>
+                                        <th>Jadwal Mulai</th>
+                                        <th>Jadwal Berakhir</th>
+                                        <th>Status</th>
+                                        <th width="100">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($running_texts as $text) : ?>
+                                        <tr data-schedule-start="<?= $text['schedule_start'] ?>"
+                                            data-schedule-end="<?= $text['schedule_end'] ?>"
+                                            data-is-active="<?= $text['is_active'] ?>">
+                                            <td><?= htmlspecialchars($text['content']) ?></td>
+                                            <td><?= ucfirst($text['orientation']) ?></td>
+                                            <td><?= $text['schedule_start'] ? date('d/m/Y H:i', strtotime($text['schedule_start'])) : '-' ?></td>
+                                            <td><?= $text['schedule_end'] ? date('d/m/Y H:i', strtotime($text['schedule_end'])) : '-' ?></td>
+                                            <td>
+                                                <span class="status-cell status-<?= strtolower($text['status_text']) ?>">
+                                                    <i class="fa fa-circle"></i>
+                                                    <?= $text['status_text'] ?>
+                                                </span>
+                                            </td>
+                                            <td class="text-end">
+                                                <div class="btn-group btn-group-sm">
+                                                    <button type="button" class="btn btn-warning" data-bs-toggle="modal" 
+                                                            data-bs-target="#editRunTextModal<?= $text['id'] ?>"
+                                                            title="Edit">
+                                                        <i class="fa fa-edit"></i>
+                                                    </button>
+                                                    <a href="?delete_runtext=<?= $text['id'] ?>" 
+                                                       class="btn btn-danger"
+                                                       onclick="return confirm('Yakin ingin menghapus running text ini?')"
+                                                       title="Hapus">
+                                                        <i class="fa fa-trash"></i>
+                                                    </a>
+                                                </div>
+                                            </td>
+                                        </tr>
+
+                                        <!-- Modal Edit Running Text -->
+                                        <div class="modal fade" id="editRunTextModal<?= $text['id'] ?>" tabindex="-1">
+                                            <div class="modal-dialog">
+                                                <div class="modal-content">
+                                                    <div class="modal-header">
+                                                        <h5 class="modal-title">Edit Running Text</h5>
+                                                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                                    </div>
+                                                    <form method="POST">
+                                                        <input type="hidden" name="edit_runtext" value="1">
+                                                        <input type="hidden" name="runtext_id" value="<?= $text['id'] ?>">
+                                                        <div class="modal-body">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Konten Running Text</label>
+                                                                <textarea class="form-control" name="content" rows="3" required><?= htmlspecialchars($text['content']) ?></textarea>
+                                                            </div>
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Orientasi</label>
+                                                                <select class="form-select" name="orientation" required>
+                                                                    <option value="landscape" <?= $text['orientation'] == 'landscape' ? 'selected' : '' ?>>Landscape</option>
+                                                                    <option value="portrait" <?= $text['orientation'] == 'portrait' ? 'selected' : '' ?>>Portrait</option>
+                                                                </select>
+                                                            </div>
+                                                            <div class="mb-3">
+                                                                <div class="form-check">
+                                                                    <input type="checkbox" class="form-check-input" id="is_active_runtext<?= $text['id'] ?>"
+                                                                           name="is_active" <?= $text['is_active'] ? 'checked' : '' ?>>
+                                                                    <label class="form-check-label" for="is_active_runtext<?= $text['id'] ?>">Aktif</label>
+                                                                </div>
+                                                            </div>
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Jadwal Mulai</label>
+                                                                <input type="datetime-local" class="form-control" 
+                                                                       name="schedule_start" 
+                                                                       value="<?= $text['schedule_start'] ? date('Y-m-d\TH:i', strtotime($text['schedule_start'])) : '' ?>">
+                                                                <div class="form-text">Kosongkan untuk tidak menggunakan jadwal</div>
+                                                            </div>
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Jadwal Berakhir</label>
+                                                                <input type="datetime-local" class="form-control" 
+                                                                       name="schedule_end" 
+                                                                       value="<?= $text['schedule_end'] ? date('Y-m-d\TH:i', strtotime($text['schedule_end'])) : '' ?>">
+                                                                <div class="form-text">Kosongkan untuk tidak menggunakan jadwal</div>
+                                                            </div>
+                                                        </div>
+                                                        <div class="modal-footer">
+                                                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
+                                                            <button type="submit" class="btn btn-primary">Simpan Perubahan</button>
+                                                        </div>
+                                                    </form>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                    <?php if (empty($running_texts)) : ?>
+                                        <tr>
+                                            <td colspan="6" class="text-center py-3">
+                                                <i class="fa fa-info-circle"></i> Belum ada running text
+                                            </td>
+                                        </tr>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    // Fungsi untuk format tanggal untuk perbandingan
+    function formatDate(date) {
+        return date.getFullYear() + '-' + 
+               String(date.getMonth() + 1).padStart(2, '0') + '-' + 
+               String(date.getDate()).padStart(2, '0') + ' ' + 
+               String(date.getHours()).padStart(2, '0') + ':' + 
+               String(date.getMinutes()).padStart(2, '0') + ':' + 
+               String(date.getSeconds()).padStart(2, '0');
+    }
+
+    // Fungsi untuk memperbarui status media berdasarkan jadwal
+    function updateMediaStatus() {
+        const now = new Date();
+        const currentTime = formatDate(now);  // Mendapatkan waktu sekarang dalam format yang dibutuhkan
+        
+        // Iterasi melalui setiap baris dan memeriksa jadwal setiap item media
+        document.querySelectorAll('tr[data-schedule-start][data-schedule-end]').forEach(row => {
+            const startTime = row.dataset.scheduleStart;
+            const endTime = row.dataset.scheduleEnd;
+            const isActive = row.dataset.isActive === '1';
+            const statusCell = row.querySelector('.status-cell');
+            
+            let newStatus = '';
+            let statusClass = '';
+            
+            if (currentTime < startTime) {
+                newStatus = 'Dijadwalkan';
+                statusClass = 'status-dijadwalkan';
+            } else if (currentTime > endTime) {
+                newStatus = 'Berakhir';
+                statusClass = 'status-berakhir';
+            } else if (isActive) {
+                newStatus = 'Aktif';
+                statusClass = 'status-aktif';
+            } else {
+                newStatus = 'Nonaktif';
+                statusClass = 'status-nonaktif';
+            }
+            
+            // Update status jika sudah berubah
+            if (!statusCell.classList.contains(statusClass)) {
+                statusCell.classList.remove('status-dijadwalkan', 'status-aktif', 'status-nonaktif', 'status-berakhir');
+                statusCell.classList.add(statusClass);
+                statusCell.innerHTML = <i class="fa fa-circle"></i> ${newStatus};
+            }
+        });
+    }
+
+    // Memanggil fungsi untuk pertama kali
+    updateMediaStatus();
+
+    // Update status setiap menit
+    setInterval(updateMediaStatus, 60000);  // Update status setiap 60 detik
+</script>
+</body>
+</html>
